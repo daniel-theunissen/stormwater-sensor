@@ -1,6 +1,4 @@
 #include <MKRGSM.h>
-
-#include <RTCZero.h>
  
 const char PINNUMBER[] = "4821";
 
@@ -11,8 +9,6 @@ char PHONENUMBER2[] = "1234567890";
 GSM gsmAccess;
 
 GSM_SMS sms;
-
-RTCZero rtc;
  
 int liquidLevel = 0;
 
@@ -29,8 +25,6 @@ void setup() {
   Serial.begin(9600);
 
   pinMode(5, INPUT);
-
-  rtc.begin();
  
   bool connected = false;
  
@@ -126,6 +120,8 @@ void processIncomingSMS() {
 
 void loop() {
 
+  unsigned long currentMillis = millis();
+
   liquidLevel = digitalRead(5);
  
   Serial.print("Liquid Level: ");
@@ -150,7 +146,7 @@ void loop() {
  
   // Re-enable notifications after the stop duration has passed
 
-  if (!sendWaterDetectedSMS && (millis() - stopCommandTime >= stopDuration)) {
+  if (!sendWaterDetectedSMS && (currentMillis - stopCommandTime >= stopDuration)) {
 
     sendWaterDetectedSMS = true;
 
