@@ -1,161 +1,434 @@
-#include <MKRGSM.h>
- 
-const char PINNUMBER[] = "4821";
+// You should really only be changing the following values
+// -------------------------------------------------------
+// Set a recipient phone number (it must be in international format including the "+" sign)
+#define SMS_TARGET  "+17077429889"
 
-char PHONENUMBER1[] = "6507146242";
+// Set the active cooldown time (how long it sleeps after you text "STFU")
+#define DISABLE_NOTIFICATIONS 60 // 60 seconds
 
-char PHONENUMBER2[] = "1234567890";
- 
-GSM gsmAccess;
+// Set the passive cooldown time (how long it takes to send another text after it detects water)
+int period = 30 * 1000;       // 30 seconds
 
-GSM_SMS sms;
- 
-int liquidLevel = 0;
+// Enable or disable cooldowns
+#define ENABLE_COOLDOWNS true
 
-bool sendWaterDetectedSMS = true;
+// See all AT commands, if wanted
+//#define DUMP_AT_COMMANDS
 
-unsigned long stopCommandTime = 0;
+// set DATA PIN for detector
+#define DATA_PIN 5
+// -------------------------------------------------------
 
-const unsigned long stopDuration = 86400000; // 24 hours in milliseconds
- 
-// Function to initialize the setup of the Arduino
 
+//If you are having issues with the network or swap the SIM card, edit the following
+// -------------------------------------------------------
+// set GSM PIN, if any
+#define GSM_PIN "0438"
+
+// GPRS credentials, if any
+const char apn[]  = "fast.t-mobile.com";     //SET TO APN
+const char gprsUser[] = "";
+const char gprsPass[] = "";
+// -------------------------------------------------------
+
+
+#define TINY_GSM_MODEM_SIM7000
+#define TINY_GSM_RX_BUFFER 1024 // Set RX buffer to 1Kb
+#define SerialAT Serial1
+
+#include <TinyGsmClient.h>
+#include <SPI.h>
+#include <Ticker.h>
+
+#ifdef DUMP_AT_COMMANDS  // if enabled it requires the streamDebugger lib
+  #include <StreamDebugger.h>
+  StreamDebugger debugger(SerialAT, Serial);
+  TinyGsm modem(debugger);
+#else
+  TinyGsm modem(SerialAT);
+#endif
+
+#define uS_TO_S_FACTOR 1000000ULL  // Conversion factor for micro seconds to seconds
+#define TIME_TO_SLEEP  60          // Time ESP32 will go to sleep (in seconds)
+
+#define UART_BAUD   115200
+#define PIN_DTR     25
+#define PIN_TX      27
+#define PIN_RX      26
+#define PWR_PIN     4
+
+#define SD_MISO     2
+#define SD_MOSI     15
+#define SD_SCLK     14
+#define SD_CS       13
+#define LED_PIN     12
+
+// Initialize variables
+int tStart;
+bool onCooldown = false;
+unsigned int liquidLevel = 0;
+String message;
+int counter, lastIndex, numberOfPieces = 24;
+String pieces[24], input;
+
+// Everything in setup is loosely adapted from https://github.com/Xinyuan-LilyGO/LilyGO-T-SIM7000G/blob/master/examples/Arduino_NetworkTest/Arduino_NetworkTest.ino
+// and https://github.com/damianjwilliams/tsim7070g/blob/main/stationary_display/stationary_display.ino
 void setup() {
+  // Set console baud rate
+  Serial.begin(115200);
+  delay(10);
 
-  Serial.begin(9600);
+  // Set sensor pin to input
+  pinMode(DATA_PIN, INPUT);
 
-  pinMode(5, INPUT);
- 
-  bool connected = false;
- 
-  // Loop until the GSM module is successfully initialized
+  // Set LED OFF
+  pinMode(LED_PIN, OUTPUT);
+  digitalWrite(LED_PIN, LOW);
 
-  while (!connected) {
+  pinMode(PWR_PIN, OUTPUT);
+  digitalWrite(PWR_PIN, HIGH);
+  delay(300);
+  digitalWrite(PWR_PIN, LOW);
 
-    if (gsmAccess.begin(PINNUMBER) == GSM_READY) {
+  SPI.begin(SD_SCLK, SD_MISO, SD_MOSI, SD_CS);
 
-      connected = true;
+  Serial.println("\nWait...");
 
-    } else {
+  delay(1000);
 
-      Serial.println("GSM initialization failed. Retrying...");
+  SerialAT.begin(UART_BAUD, SERIAL_8N1, PIN_RX, PIN_TX);
 
-      delay(1000);
-
-    }
-
+  // Restart takes quite some time
+  // To skip it, call init() instead of restart()
+  Serial.println("Initializing modem...");
+  if (!modem.restart()) {
+    Serial.println("Failed to restart modem, attempting to continue without restarting");
   }
- 
-  Serial.println("GSM module initialized successfully.");
 
+  Serial.println("Initializing modem...");
+  if (!modem.init()) {
+    Serial.println("Failed to initialize modem");
+  }
+
+  String name = modem.getModemName();
+  delay(500);
+  Serial.println("Modem Name: " + name);
+
+  String modemInfo = modem.getModemInfo();
+  delay(500);
+  Serial.println("Modem Info: " + modemInfo);
+  
+  // Unlock your SIM card with a PIN if needed
+  if ( GSM_PIN && modem.getSimStatus() != 3 ) {
+      modem.simUnlock(GSM_PIN);
+      Serial.println("Sim unlocked");
+  }
+  modem.sendAT("+CFUN=0 ");
+  if (modem.waitResponse(10000L) != 1) {
+    DBG(" +CFUN=0  false ");
+  }
+  delay(200);
+
+  /*
+    2 Automatic
+    13 GSM only
+    38 LTE only
+    51 GSM and LTE only
+  * * * */
+  String res;
+  // CHANGE NETWORK MODE, IF NEEDED
+  res = modem.setNetworkMode(2);
+  if (res != "1") {
+    DBG("setNetworkMode  false ");
+    return ;
+  }
+  delay(200);
+
+  /*
+    1 CAT-M
+    2 NB-Iot
+    3 CAT-M and NB-IoT
+  * * */
+  // CHANGE PREFERRED MODE, IF NEEDED
+  res = modem.setPreferredMode(3);
+  if (res != "1") {
+    DBG("setPreferredMode  false ");
+    return ;
+  }
+  delay(200);
+
+  modem.sendAT("+CFUN=1 ");
+  if (modem.waitResponse(10000L) != 1) {
+    DBG(" +CFUN=1  false ");
+  }
+  delay(200);
+
+  SerialAT.println("AT+CGDCONT?");
+  
+  delay(500);
+  
+  // Not sure what exactly this does
+  if (SerialAT.available()) {
+    input = SerialAT.readString();
+    for (int i = 0; i < input.length(); i++) {
+      if (input.substring(i, i + 1) == "\n") {
+        pieces[counter] = input.substring(lastIndex, i);
+        lastIndex = i + 1;
+        counter++;
+       }
+        if (i == input.length() - 1) {
+          pieces[counter] = input.substring(lastIndex, i);
+        }
+      }
+      // Reset for reuse
+      input = "";
+      counter = 0;
+      lastIndex = 0;
+
+      for ( int y = 0; y < numberOfPieces; y++) {
+        for ( int x = 0; x < pieces[y].length(); x++) {
+          char c = pieces[y][x];  //gets one byte from buffer
+          if (c == ',') {
+            if (input.indexOf(": ") >= 0) {
+              String data = input.substring((input.indexOf(": ") + 1));
+              if ( data.toInt() > 0 && data.toInt() < 25) {
+                modem.sendAT("+CGDCONT=" + String(data.toInt()) + ",\"IP\",\"" + String(apn) + "\",\"0.0.0.0\",0,0,0,0");
+              }
+              input = "";
+              break;
+            }
+          // Reset for reuse
+          input = "";
+         } else {
+          input += c;
+         }
+      }
+    }
+  } else {
+    Serial.println("Failed to get PDP!");
+  }
+
+  Serial.println("\n\n\nWaiting for network...");
+  if (!modem.waitForNetwork()) {
+    delay(10000);
+    return;
+  }
+
+  if (modem.isNetworkConnected()) {
+    Serial.println("Network connected");
+  }
+
+  // --------TESTING GPRS--------
+  
+  Serial.println("\n---Starting GPRS TEST---\n");
+  Serial.println("Connecting to: " + String(apn));
+  modem.gprsConnect(apn, gprsUser, gprsPass);
+  if (!modem.gprsConnect(apn, gprsUser, gprsPass)) {
+    Serial.println("fail");
+    delay(10000);
+    return;
+  }
+
+  Serial.print("GPRS status: ");
+  if (modem.isGprsConnected()) {
+    Serial.println("connected");
+  } else {
+    Serial.println("not connected");
+  }
+
+  String ccid = modem.getSimCCID();
+  Serial.println("CCID: " + ccid);
+
+  String imei = modem.getIMEI();
+  Serial.println("IMEI: " + imei);
+
+  String cop = modem.getOperator();
+  Serial.println("Operator: " + cop);
+
+  IPAddress local = modem.localIP();
+  Serial.println("Local IP: " + String(local));
+
+  int csq = modem.getSignalQuality();
+  Serial.println("Signal quality: " + String(csq));
+
+  SerialAT.println("AT+CPSI?");     //Get connection type and band
+  delay(500);
+  if (SerialAT.available()) {
+    String r = SerialAT.readString();
+    Serial.println(r);
+  }
+
+  modem.gprsDisconnect();
+  if (!modem.isGprsConnected()) {
+    Serial.println("GPRS disconnected");
+  } else {
+    Serial.println("GPRS disconnect: Failed.");
+  }
+  
+  modem.disableGPS();
+
+  // Set SIM7000G GPIO4 LOW ,turn off GPS power
+  // CMD:AT+SGPIO=0,4,1,0
+  // Only in version 20200415 is there a function to control GPS power
+  modem.sendAT("+SGPIO=0,4,1,0");
+  if (modem.waitResponse(10000L) != 1) {
+    DBG(" SGPIO=0,4,1,0 false ");
+  }
+  Serial.println("\n---End of GPRS TEST---\n");
+
+  modem.sendAT("+CMGF=1");                                                       // Set the message format to text mode
+  modem.waitResponse(1000L);
+  modem.sendAT("+CNMI=2,2,0,0,0\r");
+  delay(100);
+  //modem.sendAT("+CMGF=0");                                                       // Set the message format to PDU mode
+  
 }
  
 // Function to send SMS to specified phone numbers
 
-void sendsms(const char* message) {
-
-  sms.beginSMS(PHONENUMBER1);
-
-  sms.print(message);
-
-  sms.endSMS();
- 
-  sms.beginSMS(PHONENUMBER2);
-
-  sms.print(message);
-
-  sms.endSMS();
-
+void sendSMS(const char* message) {
+  String res;
+  res = modem.sendSMS(SMS_TARGET, String(message));
+  DBG("SMS:", res ? "OK" : "fail");
 }
  
 // Function to process incoming SMS messages
+// Adapted from https://github.com/damianjwilliams/tsim7070g/blob/main/stationary_display/stationary_display.ino
 
-void processIncomingSMS() {
+String readSMS() { 
+  
+  String message;
+  modem.sendAT("+CMGL=\"ALL\"");  
+  modem.waitResponse(5000L);
+  String data = SerialAT.readString();
+  
+  if(data.indexOf("+CMT:") > 0){
+    message = parseSMS(data);
+    Serial.print("The message in the readSMS function is: ");
+    Serial.println(message);
+    return message; 
+  }     
+}
 
-  if (sms.available()) {
 
-    char smsContent[160];
+String parseSMS(String data) {
 
-    int index = 0;
- 
-    // Read the incoming SMS content character by character
+  data.replace(",,", ",");
+  data.replace("\r", ",");
+  data.replace("\"", "");
+  Serial.println(data);
 
-    while (sms.available()) {
+  String for_mess = data;
 
-      char c = sms.read();
+  char delimiter = ',';
+  String date_str =  parse_SMS_by_delim(for_mess, delimiter,2);
+  String time_str =  parse_SMS_by_delim(for_mess, delimiter,3);
+  String message_str =  parse_SMS_by_delim(for_mess, delimiter,4);
 
-      if (c != -1 && index < sizeof(smsContent) - 1) {
-
-        smsContent[index] = c;
-
-        index++;
-
-      }
-
-    }
-
-    smsContent[index] = '\0';
- 
-    Serial.println("Received SMS:");
-
-    Serial.println(smsContent);
- 
-    // Check if the SMS contains the stop command
-
-    if (strstr(smsContent, "STFU") || strstr(smsContent, "stfu") || strstr(smsContent, "Stfu")) {
-
-      stopCommandTime = millis();
-
-      sendWaterDetectedSMS = false;
-
-      Serial.println("Stop command received. Notifications disabled for 24 hours.");
-
-    }
-
-  }
+  /*
+  Serial.println("************************");
+  Serial.println(date_str);
+  Serial.println(time_str);
+  Serial.println(message_str);
+  Serial.println("************************");
+  */
+  
+  return message_str;
 
 }
+
+String parse_SMS_by_delim(String sms, char delimiter, int targetIndex) {
+  // Tokenize the SMS content using the specified delimiter
+  int delimiterIndex = sms.indexOf(delimiter);
+  int currentIndex = 0;
+
+  while (delimiterIndex != -1) {
+    if (currentIndex == targetIndex) {
+    
+    String targetToken = sms.substring(0, delimiterIndex);
+    targetToken.replace("\"", "");
+    targetToken.replace("\r", "");
+    targetToken.replace("\n", "");
+    return targetToken;
+    }
+
+    // Move to the next token
+    sms = sms.substring(delimiterIndex + 1);
+    delimiterIndex = sms.indexOf(delimiter);
+    currentIndex++;
+  }
+
+  // If the target token is not found, return an empty string
+  return "";
+}
  
-// Main loop of the Arduino program
 
 void loop() {
 
-  unsigned long currentMillis = millis();
-
-  liquidLevel = digitalRead(5);
+  liquidLevel = digitalRead(DATA_PIN);
+  Serial.println(onCooldown);
  
-  Serial.print("Liquid Level: ");
+  if (!onCooldown) {
+    Serial.print("Liquid Level: ");
+    Serial.println(liquidLevel);
+    if (liquidLevel == 1) {
+      Serial.println("Water detected. SMS sent.");
+      sendSMS("Water detected. Reply STFU to this message to disable notifications for 24 hours.");
+      
+      // Try to power-off (modem may decide to restart automatically)
 
-  Serial.println(liquidLevel);
- 
-  // If water is detected and notifications are enabled, send an SMS
+      /*
+      modem.sendAT("+CPOWD=1");
+      if (modem.waitResponse(10000L) != 1) {
+          DBG("+CPOWD=1");
+      }
+      modem.poweroff();
+      Serial.println("Poweroff.");
+      */
 
-  if (liquidLevel == 1 && sendWaterDetectedSMS) {
+      #if ENABLE_COOLDOWNS
+        tStart = millis();
+        onCooldown = true;
+        Serial.print("A 30s cooldown has just started. Start time: ");
+        Serial.println(tStart);
+      #endif
 
-    sendsms("Water detected. Reply STFU to this message to disable notifications for 24 hours.");
+      delay(200);
+    }
+  }
+  
+  message = readSMS();
+  if (message == "STFU") {
+    Serial.println("************************");
+    Serial.println("STOPPED");
+    Serial.println("************************");
 
-    sendWaterDetectedSMS = false;
+    /*
+    modem.sendAT("+CMGF=0");
+    delay(200);
+    modem.sendAT("+CMGDA=");
+    modem.waitResponse(1000L);
+    delay(200);
+    modem.sendAT("+CMGF=1");
+    */
+    sendSMS("Confirmed.");
 
-    Serial.println("Water detected. SMS sent.");
-
+    #if ENABLE_COOLDOWNS
+      Serial.print("A 60s cooldown has just started");
+      esp_sleep_enable_timer_wakeup(DISABLE_NOTIFICATIONS * uS_TO_S_FACTOR);
+      delay(200);
+      esp_deep_sleep_start();
+    #endif
   }
  
-  // Process incoming SMS messages
-
-  processIncomingSMS();
- 
-  // Re-enable notifications after the stop duration has passed
-
-  if (!sendWaterDetectedSMS && (currentMillis - stopCommandTime >= stopDuration)) {
-
-    sendWaterDetectedSMS = true;
-
-    Serial.println("Notifications enabled after stop duration.");
-
+  if(((millis()-tStart) > period) && onCooldown){
+    Serial.print("The current time is: ");
+    Serial.println(millis());
+    Serial.print("The difference is: ");
+    Serial.println(millis()-tStart);
+    Serial.println("resetting cooldown");
+    onCooldown = false;
   }
- 
-  // Delay for 20 seconds
-
-  delay(20000);
+  //delay(500);
 
 }
