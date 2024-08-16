@@ -1,37 +1,3 @@
-// You should really only be changing the following values
-// -------------------------------------------------------
-// Set a recipient phone number (it must be in international format including the "+" sign)
-#define SMS_TARGET  "+17077429889"
-
-// Set the active cooldown time (how long it sleeps after you text "STFU")
-#define DISABLE_NOTIFICATIONS 60 // 60 seconds
-
-// Set the passive cooldown time (how long it takes to send another text after it detects water)
-int period = 30 * 1000;       // 30 seconds
-
-// Enable or disable cooldowns
-#define ENABLE_COOLDOWNS true
-
-// See all AT commands, if wanted
-//#define DUMP_AT_COMMANDS
-
-// set DATA PIN for detector
-#define DATA_PIN 5
-// -------------------------------------------------------
-
-
-//If you are having issues with the network or swap the SIM card, edit the following
-// -------------------------------------------------------
-// set GSM PIN, if any
-#define GSM_PIN "0438"
-
-// GPRS credentials, if any
-const char apn[]  = "fast.t-mobile.com";     //SET TO APN
-const char gprsUser[] = "";
-const char gprsPass[] = "";
-// -------------------------------------------------------
-
-
 #define TINY_GSM_MODEM_SIM7000
 #define TINY_GSM_RX_BUFFER 1024 // Set RX buffer to 1Kb
 #define SerialAT Serial1
@@ -39,6 +5,7 @@ const char gprsPass[] = "";
 #include <TinyGsmClient.h>
 #include <SPI.h>
 #include <Ticker.h>
+#include "config.h"
 
 #ifdef DUMP_AT_COMMANDS  // if enabled it requires the streamDebugger lib
   #include <StreamDebugger.h>
@@ -49,24 +16,19 @@ const char gprsPass[] = "";
 #endif
 
 #define uS_TO_S_FACTOR 1000000ULL  // Conversion factor for micro seconds to seconds
-#define TIME_TO_SLEEP  60          // Time ESP32 will go to sleep (in seconds)
 
+// Define pins for serial communication with the modem
 #define UART_BAUD   115200
 #define PIN_DTR     25
 #define PIN_TX      27
 #define PIN_RX      26
 #define PWR_PIN     4
-
-#define SD_MISO     2
-#define SD_MOSI     15
-#define SD_SCLK     14
-#define SD_CS       13
 #define LED_PIN     12
 
-// Initialize variables
-int tStart;
+// Initialize/Declare variables
+unsigned int tStart;
 bool onCooldown = false;
-unsigned int liquidLevel = 0;
+int liquidLevel = 0;
 String message;
 int counter, lastIndex, numberOfPieces = 24;
 String pieces[24], input;
@@ -75,7 +37,7 @@ String pieces[24], input;
 // and https://github.com/damianjwilliams/tsim7070g/blob/main/stationary_display/stationary_display.ino
 void setup() {
   // Set console baud rate
-  Serial.begin(115200);
+  Serial.begin(UART_BAUD);
   delay(10);
 
   // Set sensor pin to input
@@ -85,12 +47,11 @@ void setup() {
   pinMode(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, LOW);
 
+  // Turn on the modem
   pinMode(PWR_PIN, OUTPUT);
   digitalWrite(PWR_PIN, HIGH);
   delay(300);
   digitalWrite(PWR_PIN, LOW);
-
-  SPI.begin(SD_SCLK, SD_MISO, SD_MOSI, SD_CS);
 
   Serial.println("\nWait...");
 
@@ -98,13 +59,13 @@ void setup() {
 
   SerialAT.begin(UART_BAUD, SERIAL_8N1, PIN_RX, PIN_TX);
 
-  // Restart takes quite some time
-  // To skip it, call init() instead of restart()
+  // Restart modem (can take a while)
   Serial.println("Initializing modem...");
   if (!modem.restart()) {
     Serial.println("Failed to restart modem, attempting to continue without restarting");
   }
 
+  // Initialize modem
   Serial.println("Initializing modem...");
   if (!modem.init()) {
     Serial.println("Failed to initialize modem");
@@ -118,7 +79,7 @@ void setup() {
   delay(500);
   Serial.println("Modem Info: " + modemInfo);
   
-  // Unlock your SIM card with a PIN if needed
+  // Unlock SIM card with a PIN if needed
   if ( GSM_PIN && modem.getSimStatus() != 3 ) {
       modem.simUnlock(GSM_PIN);
       Serial.println("Sim unlocked");
@@ -157,6 +118,7 @@ void setup() {
   }
   delay(200);
 
+  // Sets modem to full functionality (receive, send, LTE)
   modem.sendAT("+CFUN=1 ");
   if (modem.waitResponse(10000L) != 1) {
     DBG(" +CFUN=1  false ");
@@ -167,7 +129,7 @@ void setup() {
   
   delay(500);
   
-  // Not sure what exactly this does
+  // Defines Packet Data Protocol (PDP) context
   if (SerialAT.available()) {
     input = SerialAT.readString();
     for (int i = 0; i < input.length(); i++) {
@@ -284,7 +246,7 @@ void setup() {
   
 }
  
-// Function to send SMS to specified phone numbers
+// Function to send SMS to specified phone number
 
 void sendSMS(const char* message) {
   String res;
@@ -298,10 +260,11 @@ void sendSMS(const char* message) {
 String readSMS() { 
   
   String message;
-  modem.sendAT("+CMGL=\"ALL\"");  
+  modem.sendAT("+CMGL=\"ALL\"");  // List all stored messages
   modem.waitResponse(5000L);
   String data = SerialAT.readString();
   
+  // Check for received messages
   if(data.indexOf("+CMT:") > 0){
     message = parseSMS(data);
     Serial.print("The message in the readSMS function is: ");
@@ -316,7 +279,7 @@ String parseSMS(String data) {
   data.replace(",,", ",");
   data.replace("\r", ",");
   data.replace("\"", "");
-  Serial.println(data);
+  //Serial.println(data);
 
   String for_mess = data;
 
@@ -364,29 +327,20 @@ String parse_SMS_by_delim(String sms, char delimiter, int targetIndex) {
  
 
 void loop() {
-
-  liquidLevel = digitalRead(DATA_PIN);
-  Serial.println(onCooldown);
  
+ // If the device is not on cooldown, check for liquid
   if (!onCooldown) {
+    liquidLevel = digitalRead(DATA_PIN);
     Serial.print("Liquid Level: ");
     Serial.println(liquidLevel);
+
+    // If water is detected, send a notification
     if (liquidLevel == 1) {
       Serial.println("Water detected. SMS sent.");
-      sendSMS("Water detected. Reply STFU to this message to disable notifications for 24 hours.");
-      
-      // Try to power-off (modem may decide to restart automatically)
-
-      /*
-      modem.sendAT("+CPOWD=1");
-      if (modem.waitResponse(10000L) != 1) {
-          DBG("+CPOWD=1");
-      }
-      modem.poweroff();
-      Serial.println("Poweroff.");
-      */
+      sendSMS("Water detected. Reply STFU to this message to disable notifications for 24 hours. A confirmation text will be sent");
 
       #if ENABLE_COOLDOWNS
+        // Start cooldown timer
         tStart = millis();
         onCooldown = true;
         Serial.print("A 30s cooldown has just started. Start time: ");
@@ -398,30 +352,26 @@ void loop() {
   }
   
   message = readSMS();
+
   if (message == "STFU") {
     Serial.println("************************");
     Serial.println("STOPPED");
     Serial.println("************************");
 
-    /*
-    modem.sendAT("+CMGF=0");
-    delay(200);
-    modem.sendAT("+CMGDA=");
-    modem.waitResponse(1000L);
-    delay(200);
-    modem.sendAT("+CMGF=1");
-    */
-    sendSMS("Confirmed.");
+    sendSMS("Notifications disabled.");
 
     #if ENABLE_COOLDOWNS
-      Serial.print("A 60s cooldown has just started");
-      esp_sleep_enable_timer_wakeup(DISABLE_NOTIFICATIONS * uS_TO_S_FACTOR);
+      Serial.print("Disabled for specified time.");  
+
+      // Puts ESP32 into deep sleep mode for specified time
+      esp_sleep_enable_timer_wakeup(DISABLE_TIME * uS_TO_S_FACTOR);
       delay(200);
       esp_deep_sleep_start();
     #endif
   }
- 
-  if(((millis()-tStart) > period) && onCooldown){
+  
+  // Checks the elapsed time since cooldown started
+  if(((millis()-tStart) > SLEEP_TIME) && onCooldown){
     Serial.print("The current time is: ");
     Serial.println(millis());
     Serial.print("The difference is: ");
@@ -429,6 +379,4 @@ void loop() {
     Serial.println("resetting cooldown");
     onCooldown = false;
   }
-  //delay(500);
-
 }
