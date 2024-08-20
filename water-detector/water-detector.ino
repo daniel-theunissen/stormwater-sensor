@@ -261,7 +261,7 @@ String readSMS() {
   
   String message;
   modem.sendAT("+CMGL=\"ALL\"");  // List all stored messages
-  modem.waitResponse(5000L);
+  modem.waitResponse(10000L);
   String data = SerialAT.readString();
   
   // Check for received messages
@@ -362,6 +362,13 @@ void loop() {
 
     #if ENABLE_COOLDOWNS
       Serial.print("Disabled for specified time.");  
+
+      // Power down modem
+      modem.sendAT("+CPOWD=1");
+      if (modem.waitResponse(10000L) != 1) {
+        DBG("+CPOWD=1");
+      }
+      modem.poweroff();
 
       // Puts ESP32 into deep sleep mode for specified time
       esp_sleep_enable_timer_wakeup(DISABLE_TIME * uS_TO_S_FACTOR);
