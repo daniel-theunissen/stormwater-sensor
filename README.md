@@ -1,8 +1,11 @@
 ﻿# Stormwater Detector
 
-This repository contains the script for a sensing device that detects if water comes into contact with a specific area and notifies someone using SMS. 
+This repository contains the script for a sensing device that detects if water comes into contact with a specific area and notifies someone using SMS.  
+
+<img src="https://github.com/user-attachments/assets/b39ec608-522d-49dc-aacb-a7e000608104" width="750" />
 
 ## How To Use
+
 Clone the project repository
 ```
 git clone https://github.com/daniel-theunissen/stormwater-sensor.git
